@@ -1,0 +1,16 @@
+# Allowlist: upload only the app shell. Everything else in the repo (.boko/ build tree,
+# patches, fixtures, scripts, this file, wrangler.jsonc) stays off the site.
+# Add new shell files here (and to SHELL in sw.js).
+*
+!index.html
+!app.js
+!epub.js
+!worker.js
+!sw.js
+!manifest.webmanifest
+!icon.svg
+!icon-192.png
+!icon-512.png
+!pkg/
+!pkg/boko.js
+!pkg/boko_bg.wasm

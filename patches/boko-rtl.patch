@@ -1,0 +1,577 @@
+diff --git a/src/export/azw3/kf8.rs b/src/export/azw3/kf8.rs
+index 4c40dcf..47fbc41 100644
+--- a/src/export/azw3/kf8.rs
++++ b/src/export/azw3/kf8.rs
+@@ -814,6 +814,10 @@ impl Kf8Builder {
+             let primary = self.ctx.metadata.language.split('-').next().unwrap_or("en");
+             records.push((524, primary.as_bytes().to_vec()));
+         }
++        // Page-progression direction (527): Kindle turns pages right-to-left.
++        if self.ctx.metadata.is_rtl() {
++            records.push((527, b"rtl".to_vec()));
++        }
+ 
+         // KF8 housekeeping fields (calibre emits all of these on every book;
+         // omitting them is correlated with Kindle refusing to open the file).
+diff --git a/src/export/kfx/metadata_frags.rs b/src/export/kfx/metadata_frags.rs
+index 4531661..a65afd4 100644
+--- a/src/export/kfx/metadata_frags.rs
++++ b/src/export/kfx/metadata_frags.rs
+@@ -274,7 +274,13 @@ pub(super) fn build_document_data_fragment(ctx: &ExportContext) -> KfxFragment {
+     let document_data = IonValue::Struct(vec![
+         (
+             KfxSymbol::Direction as u64,
+-            IonValue::Symbol(KfxSymbol::Ltr as u64),
++            IonValue::Symbol(
++                (if ctx.rtl {
++                    KfxSymbol::Rtl
++                } else {
++                    KfxSymbol::Ltr
++                }) as u64,
++            ),
+         ),
+         (
+             KfxSymbol::ColumnCount as u64,
+diff --git a/src/export/kfx/mod.rs b/src/export/kfx/mod.rs
+index b182106..1c33ad6 100644
+--- a/src/export/kfx/mod.rs
++++ b/src/export/kfx/mod.rs
+@@ -79,6 +79,7 @@ fn build_kfx_container(book: &Book) -> crate::Result<Vec<u8>> {
+     let meta = book.metadata();
+     let container_id = generate_container_id(&format!("{}\n{}", meta.identifier, meta.title));
+     let mut ctx = ExportContext::new();
++    ctx.rtl = meta.is_rtl();
+ 
+     // ========================================================================
+     // PASS 1: SURVEY (Read-Only / State Accumulation)
+diff --git a/src/export/normalize.rs b/src/export/normalize.rs
+index 5bbd8ef..8a86a6e 100644
+--- a/src/export/normalize.rs
++++ b/src/export/normalize.rs
+@@ -32,7 +32,7 @@ use crate::model::{Book, Chapter, NodeId, Role};
+ use crate::style::{StyleId, StylePool};
+ 
+ use super::html_synth::MathForm;
+-use super::{generate_css, synthesize_xhtml_document_with_class_list_math};
++use super::{escape_xml, generate_css, synthesize_xhtml_document_with_class_list_math};
+ 
+ /// Collects styles from all chapters into a unified pool.
+ ///
+@@ -331,6 +331,19 @@ pub fn normalize_book(book: &Book) -> crate::Result<NormalizedContent> {
+     normalize_book_math(book, MathForm::MathMl)
+ }
+ 
++/// Add `attrs` to the synthesized document's `<html>` start tag.
++fn with_root_language(document: &str, attrs: &str) -> String {
++    const HTML_TAG: &str = "xmlns:epub=\"http://www.idpf.org/2007/ops\">";
++    if attrs.is_empty() {
++        return document.to_string();
++    }
++    document.replacen(
++        HTML_TAG,
++        &format!("xmlns:epub=\"http://www.idpf.org/2007/ops\"{attrs}>"),
++        1,
++    )
++}
++
+ /// [`normalize_book`] with an explicit math serialization form — KF8/MOBI
+ /// targets pass [`MathForm::Text`] because their renderers cannot display
+ /// MathML.
+@@ -443,6 +456,20 @@ pub fn normalize_book_math(book: &Book, math_form: MathForm) -> crate::Result<No
+ 
+     // Each chapter's synthesis reads only shared immutable state, so this
+     // fans out across chapters when the `parallel` feature is on.
++    // Synthesized chapters carry no lang/dir of their own: take the book's.
++    let root_attrs = {
++        let meta = book.metadata();
++        let lang = escape_xml(&meta.language);
++        let mut attrs = String::new();
++        if !lang.is_empty() {
++            attrs = format!(" xml:lang=\"{lang}\" lang=\"{lang}\"");
++        }
++        if meta.is_rtl() {
++            attrs.push_str(" dir=\"rtl\"");
++        }
++        attrs
++    };
++
+     let synthesize_one = |(idx, (chapter_id, source_path, ir)): (
+         usize,
+         &(ChapterId, String, Arc<Chapter>),
+@@ -473,8 +500,9 @@ pub fn normalize_book_math(book: &Book, math_form: MathForm) -> crate::Result<No
+         );
+ 
+         // Rewrite internal links to target the emitted chapter files.
++        let document = with_root_language(&result.body, &root_attrs);
+         let document = rewrite_document_hrefs(
+-            &result.body,
++            &document,
+             source_path,
+             &source_to_output,
+             &anchor_to_output,
+diff --git a/src/import/azw3.rs b/src/import/azw3.rs
+index 7c288e0..fbdd050 100644
+--- a/src/import/azw3.rs
++++ b/src/import/azw3.rs
+@@ -773,6 +773,7 @@ fn build_metadata(
+         metadata.date = exth.pub_date.clone();
+         metadata.rights = exth.rights.clone();
+         metadata.language = exth.language.clone().unwrap_or_default();
++        metadata.page_progression_direction = exth.page_progression_direction.clone();
+         metadata.identifier = exth
+             .isbn
+             .clone()
+diff --git a/src/import/kfx.rs b/src/import/kfx.rs
+index 1666804..1b818aa 100644
+--- a/src/import/kfx.rs
++++ b/src/import/kfx.rs
+@@ -527,6 +527,21 @@ impl KfxImporter {
+             }
+         }
+ 
++        // document_data ($538) carries the book's reading direction.
++        if let Some(loc) = self
++            .entities
++            .iter()
++            .find(|e| e.type_id == KfxSymbol::DocumentData as u32)
++            .copied()
++            && let Ok(elem) = self.parse_entity_ion(loc)
++            && let Some(fields) = elem.as_struct()
++            && let Some(dir) =
++                get_field(fields, sym!(Direction)).and_then(|v| self.get_symbol_text(v))
++            && dir == "rtl"
++        {
++            self.metadata.page_progression_direction = Some("rtl".to_string());
++        }
++
+         Ok(())
+     }
+ 
+diff --git a/src/import/mobi.rs b/src/import/mobi.rs
+index d19aa9e..da75f28 100644
+--- a/src/import/mobi.rs
++++ b/src/import/mobi.rs
+@@ -520,6 +520,7 @@ fn build_metadata(
+         metadata.date = exth.pub_date.clone();
+         metadata.rights = exth.rights.clone();
+         metadata.language = exth.language.clone().unwrap_or_default();
++        metadata.page_progression_direction = exth.page_progression_direction.clone();
+         metadata.identifier = exth
+             .isbn
+             .clone()
+diff --git a/src/kfx/context.rs b/src/kfx/context.rs
+index ba7b612..975ca65 100644
+--- a/src/kfx/context.rs
++++ b/src/kfx/context.rs
+@@ -656,6 +656,10 @@ pub struct ExportContext {
+     /// Global symbol table - strings → symbol IDs.
+     pub symbols: SymbolTable,
+ 
++    /// The book reads right-to-left (`Metadata::is_rtl`): the document
++    /// direction, and what content without its own direction inherits.
++    pub rtl: bool,
++
+     /// Fragment ID generator (starts at `IdGenerator::FRAGMENT_MIN_ID`, 866).
+     pub fragment_ids: IdGenerator,
+ 
+@@ -871,6 +875,7 @@ impl ExportContext {
+ 
+         Self {
+             symbols,
++            rtl: false,
+             fragment_ids: IdGenerator::new(),
+             resource_registry: ResourceRegistry::new(),
+             section_ids: Vec::new(),
+@@ -1081,6 +1086,20 @@ impl ExportContext {
+     ) -> crate::kfx::style_registry::ComputedStyle {
+         let schema = crate::kfx::style_schema::StyleSchema::standard();
+         let mut builder = crate::kfx::style_registry::StyleBuilder::new(schema);
++        // Undeclared direction is the document's: resolving it on both sides
++        // emits `direction` only where content departs from its context.
++        let doc_direction = |s: &crate::style::ComputedStyle| {
++            let mut s = s.clone();
++            if s.direction == crate::style::Direction::Unset {
++                s.direction = if self.rtl {
++                    crate::style::Direction::Rtl
++                } else {
++                    crate::style::Direction::Ltr
++                };
++            }
++            s
++        };
++        let (ir_style, parent) = (&doc_direction(ir_style), &doc_direction(parent));
+         if self.font_scale != 1.0 || self.line_scale != 1.0 {
+             let scaled_parent = if parent_is_default {
+                 parent.clone()
+diff --git a/src/kfx/style_schema.rs b/src/kfx/style_schema.rs
+index 5e5699b..04b429d 100644
+--- a/src/kfx/style_schema.rs
++++ b/src/kfx/style_schema.rs
+@@ -199,6 +199,7 @@ pub enum IrField {
+     WordSpacing,
+     TextTransform,
+     Hyphens,
++    Direction,
+     WhiteSpace,
+     // Phase 2: Text decoration extensions
+     UnderlineStyle,
+@@ -649,6 +650,16 @@ impl StyleSchema {
+             ]),
+         });
+ 
++        schema.register(StylePropertyRule {
++            ir_key: "direction",
++            ir_field: Some(IrField::Direction),
++            kfx_symbol: KfxSymbol::Direction,
++            transform: ValueTransform::Map(vec![
++                ("ltr".into(), KfxValue::Symbol(KfxSymbol::Ltr)),
++                ("rtl".into(), KfxValue::Symbol(KfxSymbol::Rtl)),
++            ]),
++        });
++
+         schema.register(StylePropertyRule {
+             ir_key: "white-space",
+             ir_field: Some(IrField::WhiteSpace),
+@@ -1768,7 +1779,14 @@ pub fn extract_ir_field(
+         IrField::FontWeight => inherited("font-weight"),
+         IrField::FontStyle => inherited("font-style"),
+         IrField::FontVariant => inherited("font-variant"),
+-        IrField::TextAlign => inherited("text-align"),
++        // KFX has no start/end alignment: resolve them against the direction.
++        IrField::TextAlign => {
++            inherited("text-align").map(|v| match (v.as_str(), ir_style.direction) {
++                ("start", ir_style::Direction::Rtl) => "right".to_string(),
++                ("end", ir_style::Direction::Rtl) => "left".to_string(),
++                _ => v,
++            })
++        }
+         IrField::Color => {
+             if ir_style.color == parent.color {
+                 None
+@@ -1788,6 +1806,7 @@ pub fn extract_ir_field(
+         IrField::VerticalAlign => shared("vertical-align"),
+         IrField::TextTransform => inherited("text-transform"),
+         IrField::Hyphens => inherited("hyphens"),
++        IrField::Direction => inherited("direction"),
+         IrField::WhiteSpace => shared("white-space"),
+         IrField::UnderlineColor => shared("text-decoration-color"),
+         IrField::Width => shared("width"),
+@@ -2118,6 +2137,13 @@ pub fn apply_ir_field(ir_style: &mut ir_style::ComputedStyle, field: IrField, cs
+                 _ => ir_style::Hyphens::None,
+             };
+         }
++        IrField::Direction => {
++            ir_style.direction = match css_value {
++                "rtl" => ir_style::Direction::Rtl,
++                "ltr" => ir_style::Direction::Ltr,
++                _ => ir_style::Direction::Unset,
++            };
++        }
+         IrField::WhiteSpace => {
+             ir_style.white_space = match css_value {
+                 "normal" => ir_style::WhiteSpace::Normal,
+@@ -2692,6 +2718,7 @@ mod tests {
+             IrField::WordSpacing,
+             IrField::TextTransform,
+             IrField::Hyphens,
++            IrField::Direction,
+             IrField::WhiteSpace,
+             IrField::UnderlineStyle,
+             IrField::Overline,
+diff --git a/src/mobi/headers.rs b/src/mobi/headers.rs
+index 028c34c..7f06736 100644
+--- a/src/mobi/headers.rs
++++ b/src/mobi/headers.rs
+@@ -251,6 +251,8 @@ pub struct ExthHeader {
+     pub cover_offset: Option<u32>,
+     pub thumbnail_offset: Option<u32>,
+     pub language: Option<String>,
++    /// EXTH 527 `page-progression-direction` ("rtl" for right-to-left books).
++    pub page_progression_direction: Option<String>,
+     pub kf8_boundary: Option<u32>,
+ }
+ 
+@@ -347,6 +349,7 @@ impl ExthHeader {
+                 }
+                 503 => exth.title = Some(decode(content).trim().to_string()),
+                 524 => exth.language = Some(decode(content).trim().to_string()),
++                527 => exth.page_progression_direction = Some(decode(content).trim().to_string()),
+                 _ => {}
+             }
+ 
+diff --git a/src/model/metadata.rs b/src/model/metadata.rs
+index acb5477..374acfa 100644
+--- a/src/model/metadata.rs
++++ b/src/model/metadata.rs
+@@ -102,6 +102,36 @@ pub struct Metadata {
+     pub page_progression_direction: Option<String>,
+ }
+ 
++impl Metadata {
++    /// Whether the book reads right-to-left: the spine's
++    /// `page-progression-direction` when set, else the language (Arabic,
++    /// Hebrew, Persian, Urdu, ...), since many RTL EPUB 2 books omit it.
++    pub fn is_rtl(&self) -> bool {
++        match self.page_progression_direction.as_deref() {
++            Some("rtl") => true,
++            Some("ltr") => false,
++            _ => {
++                let primary = self.language.split(['-', '_']).next().unwrap_or("");
++                matches!(
++                    primary.to_ascii_lowercase().as_str(),
++                    "ar" | "arc"
++                        | "ckb"
++                        | "dv"
++                        | "fa"
++                        | "he"
++                        | "iw"
++                        | "ku"
++                        | "ps"
++                        | "sd"
++                        | "ug"
++                        | "ur"
++                        | "yi"
++                )
++            }
++        }
++    }
++}
++
+ /// A table of contents entry (hierarchical)
+ ///
+ /// Built from the EPUB 3 nav document or EPUB 2 NCX (or the equivalent
+diff --git a/src/style/cascade.rs b/src/style/cascade.rs
+index 69ce941..283f153 100644
+--- a/src/style/cascade.rs
++++ b/src/style/cascade.rs
+@@ -61,6 +61,7 @@ pub(crate) fn inherit_from_parent(parent: &ComputedStyle) -> ComputedStyle {
+         word_spacing: parent.word_spacing,
+         text_transform: parent.text_transform,
+         hyphens: parent.hyphens,
++        direction: parent.direction,
+         // Text decoration (inherited in some contexts)
+         text_decoration_underline: parent.text_decoration_underline,
+         text_decoration_line_through: parent.text_decoration_line_through,
+@@ -533,6 +534,7 @@ fn apply_declaration(style: &mut ComputedStyle, decl: &Declaration) {
+         Declaration::WordSpacing(l) => style.word_spacing = *l,
+         Declaration::TextTransform(t) => style.text_transform = *t,
+         Declaration::Hyphens(h) => style.hyphens = *h,
++        Declaration::Direction(d) => style.direction = *d,
+         Declaration::WhiteSpace(ws) => style.white_space = *ws,
+         Declaration::VerticalAlign(v) => style.vertical_align = *v,
+ 
+diff --git a/src/style/declaration.rs b/src/style/declaration.rs
+index 07740c8..5b449ba 100644
+--- a/src/style/declaration.rs
++++ b/src/style/declaration.rs
+@@ -15,8 +15,8 @@ use super::parse::font::{
+ };
+ use super::parse::keywords::{
+     parse_border_collapse, parse_border_style_value, parse_box_sizing, parse_break_inside,
+-    parse_break_value, parse_clear, parse_decoration_style, parse_display, parse_float,
+-    parse_font_style, parse_font_variant, parse_hyphens, parse_list_style_position,
++    parse_break_value, parse_clear, parse_decoration_style, parse_direction, parse_display,
++    parse_float, parse_font_style, parse_font_variant, parse_hyphens, parse_list_style_position,
+     parse_list_style_shorthand, parse_list_style_type, parse_overflow_wrap, parse_text_align,
+     parse_text_transform, parse_vertical_align, parse_visibility, parse_white_space,
+     parse_word_break,
+@@ -68,6 +68,9 @@ pub enum Declaration {
+     TextTransform(TextTransform),
+     /// `hyphens`: automatic hyphenation mode.
+     Hyphens(Hyphens),
++    /// `direction`: base text direction (also set by the `dir` attribute
++    /// through the UA stylesheet).
++    Direction(Direction),
+     /// `white-space`: whitespace collapsing and line-wrapping behavior.
+     WhiteSpace(WhiteSpace),
+     /// `vertical-align`: inline/table-cell vertical alignment (includes
+@@ -335,6 +338,7 @@ impl Declaration {
+             "hyphens" | "-epub-hyphens" | "-webkit-hyphens" | "-moz-hyphens"
+             | "adobe-hyphenate" => parse_hyphens(input).map(Self::Hyphens),
+             "white-space" => parse_white_space(input).map(Self::WhiteSpace),
++            "direction" => parse_direction(input).map(Self::Direction),
+             "vertical-align" => parse_vertical_align(input).map(Self::VerticalAlign),
+ 
+             // Text decoration
+diff --git a/src/style/mod.rs b/src/style/mod.rs
+index 5c7fd06..1925c38 100644
+--- a/src/style/mod.rs
++++ b/src/style/mod.rs
+@@ -32,9 +32,10 @@ pub trait ToCss {
+ 
+ // Re-export property types
+ pub use properties::{
+-    BorderCollapse, BorderStyle, BoxSizing, BreakValue, Clear, Color, DecorationStyle, Display,
+-    Float, FontStyle, FontVariant, FontWeight, Hyphens, Length, ListStylePosition, ListStyleType,
+-    OverflowWrap, TextAlign, TextTransform, VerticalAlign, Visibility, WhiteSpace, WordBreak,
++    BorderCollapse, BorderStyle, BoxSizing, BreakValue, Clear, Color, DecorationStyle, Direction,
++    Display, Float, FontStyle, FontVariant, FontWeight, Hyphens, Length, ListStylePosition,
++    ListStyleType, OverflowWrap, TextAlign, TextTransform, VerticalAlign, Visibility, WhiteSpace,
++    WordBreak,
+ };
+ 
+ // Re-export core style types
+diff --git a/src/style/parse/keywords.rs b/src/style/parse/keywords.rs
+index bbff598..2c73bcf 100644
+--- a/src/style/parse/keywords.rs
++++ b/src/style/parse/keywords.rs
+@@ -6,9 +6,9 @@
+ use cssparser::Parser;
+ 
+ use crate::style::properties::{
+-    BorderCollapse, BorderStyle, BoxSizing, BreakValue, Clear, DecorationStyle, Display, Float,
+-    FontStyle, FontVariant, Hyphens, ListStylePosition, ListStyleType, OverflowWrap, TextAlign,
+-    TextTransform, VerticalAlign, Visibility, WhiteSpace, WordBreak,
++    BorderCollapse, BorderStyle, BoxSizing, BreakValue, Clear, DecorationStyle, Direction, Display,
++    Float, FontStyle, FontVariant, Hyphens, ListStylePosition, ListStyleType, OverflowWrap,
++    TextAlign, TextTransform, VerticalAlign, Visibility, WhiteSpace, WordBreak,
+ };
+ 
+ use crate::style::Declaration;
+@@ -32,6 +32,7 @@ keyword_parser!(parse_font_variant, FontVariant);
+ keyword_parser!(parse_text_align, TextAlign);
+ keyword_parser!(parse_text_transform, TextTransform);
+ keyword_parser!(parse_hyphens, Hyphens);
++keyword_parser!(parse_direction, Direction);
+ keyword_parser!(parse_white_space, WhiteSpace);
+ keyword_parser!(parse_decoration_style, DecorationStyle);
+ keyword_parser!(parse_display, Display);
+diff --git a/src/style/properties.rs b/src/style/properties.rs
+index f5ff860..1bb69ee 100644
+--- a/src/style/properties.rs
++++ b/src/style/properties.rs
+@@ -141,6 +141,21 @@ enum_property! {
+     }
+ }
+ 
++enum_property! {
++    /// CSS `direction` (base text direction). `Unset` is IR-only: content that
++    /// never declared a direction inherits the document's (see
++    /// `Metadata::is_rtl`), so it is never written out.
++    pub enum Direction {
++        /// No direction declared (inherits the document's).
++        #[default]
++        Unset => "unset",
++        /// Left-to-right.
++        Ltr => "ltr",
++        /// Right-to-left.
++        Rtl => "rtl",
++    }
++}
++
+ enum_property! {
+     /// CSS `hyphens` values (automatic hyphenation mode).
+     /// Default is `Manual` so that explicit `hyphens: auto` is emitted in KFX output.
+diff --git a/src/style/to_css.rs b/src/style/to_css.rs
+index 8ee434d..c44b915 100644
+--- a/src/style/to_css.rs
++++ b/src/style/to_css.rs
+@@ -161,6 +161,8 @@ const PROPERTIES: &[CssProperty] = &[
+     prop!("text-transform", text_transform),
+     // Hyphenation.
+     prop!("hyphens", hyphens),
++    // Base text direction.
++    prop!("direction", direction),
+     // White-space.
+     prop!("white-space", white_space),
+     // Underline style.
+diff --git a/src/style/types.rs b/src/style/types.rs
+index 30b0ce1..e396bfe 100644
+--- a/src/style/types.rs
++++ b/src/style/types.rs
+@@ -128,6 +128,9 @@ pub struct ComputedStyle {
+     /// `hyphens` automatic hyphenation mode (defaults to `Manual`).
+     pub hyphens: Hyphens,
+ 
++    /// `direction` base text direction (`Unset` inherits the document's).
++    pub direction: Direction,
++
+     /// `white-space` collapsing/wrapping behavior.
+     pub white_space: WhiteSpace,
+ 
+@@ -274,6 +277,7 @@ impl Default for ComputedStyle {
+             word_spacing: Default::default(),
+             text_transform: Default::default(),
+             hyphens: Default::default(),
++            direction: Default::default(),
+             white_space: Default::default(),
+             underline_style: Default::default(),
+             overline: Default::default(),
+diff --git a/tests/cascade_golden.rs b/tests/cascade_golden.rs
+index c738873..5014be4 100644
+--- a/tests/cascade_golden.rs
++++ b/tests/cascade_golden.rs
+@@ -104,12 +104,15 @@ fn descendant_book() -> EpubBuilder {
+ // Updated again when anonymous mixed-content wrappers started interning an
+ // inherit-only style (CSS anonymous-box semantics) instead of the default
+ // StyleId — the pool gains entries, so class numbering shifts.
+-const FP_EPICTETUS: &str = "2f62e95c8fba1a676cf91f2921768e0ddcd4ebfc";
+-const FP_CLASS: &str = "0011593d1051d42ce417aa0bd9d63012fdaf42b7";
++// Updated again when synthesized chapters started carrying the book's
++// language (and `dir="rtl"` for RTL books) on `<html>`.
++const FP_EPICTETUS: &str = "9cb1a802135b00fbe160ca87f1f2b48bf938d9a9";
++const FP_CLASS: &str = "180d1dc1a33582efd84d9b6c2866574767f6fca8";
+ // Updated when the UA stylesheet's blockquote/figure/dd margins moved from
+ // the browser-literal 40px to 2.5em (same length at the default font size,
+ // but it scales with the font instead of freezing at a device-pixel size).
+-const FP_DESCENDANT: &str = "1794dcb313c9799f0c5c9fff01c8ffedfd886c68";
++// Updated again for the book language on `<html>` (see above).
++const FP_DESCENDANT: &str = "e3fa05c09c34029d74790deeb0a0c52548e508d3";
+ 
+ #[test]
+ fn cascade_output_is_stable_epictetus() {
+diff --git a/tests/export_validity.rs b/tests/export_validity.rs
+index 2dc3f14..901c318 100644
+--- a/tests/export_validity.rs
++++ b/tests/export_validity.rs
+@@ -88,6 +88,50 @@ fn kfx_to_azw3_toc_targets_are_distinct() {
+     );
+ }
+ 
++#[test]
++fn rtl_direction_survives_kfx_and_azw3_roundtrips() {
++    use common::{Doc, EpubBuilder};
++
++    let epub = EpubBuilder::new("RTL Book")
++        .language("ar")
++        .doc(
++            Doc::new(
++                "text/ch1.xhtml",
++                "الفصل",
++                "<h1>عنوان</h1><p>نص عربي.</p><p dir=\"ltr\">English inside.</p>",
++            )
++            .lang_dir("ar", "rtl"),
++        )
++        .build();
++
++    // No spine direction in the source: Arabic alone must make it RTL.
++    for format in [Format::Kfx, Format::Azw3] {
++        let mut book = boko::Book::from_bytes(&epub, Format::Epub).expect("import rtl epub");
++        let mut back = common::roundtrip(&mut book, format);
++        assert_eq!(
++            back.metadata().page_progression_direction.as_deref(),
++            Some("rtl"),
++            "{format:?} must carry the RTL reading direction"
++        );
++        if format == Format::Kfx {
++            // KFX → EPUB rebuilds chapters from the IR: the document direction
++            // lands on <html>, the LTR paragraph keeps its own.
++            let bytes = common::export_to_bytes(&mut back, Format::Epub);
++            let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
++            let mut text = String::new();
++            for i in 0..zip.len() {
++                use std::io::Read;
++                zip.by_index(i).unwrap().read_to_string(&mut text).ok();
++            }
++            assert!(text.contains(r#"dir="rtl""#), "EPUB from KFX lost dir=rtl");
++            assert!(
++                text.contains("direction: ltr"),
++                "EPUB from KFX lost the LTR paragraph"
++            );
++        }
++    }
++}
++
+ #[test]
+ fn rtl_page_progression_direction_survives_epub_roundtrip() {
+     use common::{Doc, EpubBuilder, Nav};

@@ -1,0 +1,11 @@
+// Static-assets-only Worker: Cloudflare serves the app shell, there is no server code.
+// Deploy: npx wrangler@4 deploy   (what gets uploaded is allowlisted in .assetsignore)
+{
+  "$schema": "https://unpkg.com/wrangler@4/config-schema.json",
+  "name": "shelf",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "."
+  },
+  "routes": [{ "pattern": "ebook.hefni101.dev", "custom_domain": true }]
+}
