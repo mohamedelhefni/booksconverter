@@ -438,7 +438,8 @@ const SIRAAJ = 'https://analytics.hefni101.dev';
 if (location.hostname === 'ebook.hefni101.dev') {
   const load = src => new Promise((resolve, reject) =>
     document.head.append(Object.assign(document.createElement('script'), { src, onload: resolve, onerror: reject })));
-  Promise.all([load(`${SIRAAJ}/sdk/analytics.umd.min.js`), load(`${SIRAAJ}/sdk/replay.min.js`)]).then(() => {
+  // analytics.min.js, not analytics.umd.min.js: only that build has the replayTarget() replay needs.
+  Promise.all([load(`${SIRAAJ}/sdk/analytics.min.js`), load(`${SIRAAJ}/sdk/replay.min.js`)]).then(() => {
     const { analytics } = window.SiraajAnalytics;
     // The token is a project-scoped, write-only key (public by design; revocable in the dashboard).
     // The server takes the project from it, so projectId is only a label.
