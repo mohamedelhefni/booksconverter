@@ -156,6 +156,9 @@ export async function openEpub(blob) {
       const root = doc.documentElement;
       if (lang && !root.hasAttribute('lang') && !root.hasAttribute('xml:lang')) root.setAttribute('lang', lang);
       if (dir === 'rtl' && !root.hasAttribute('dir') && !doc.body?.hasAttribute('dir')) root.setAttribute('dir', 'rtl');
+      // Keeps book text out of session replays. rrweb records same-origin frames and only honours
+      // the block class inside the frame's document, so it has to be on the chapter itself.
+      root.classList.add('siraaj-block');
       const meta = doc.createElementNS('http://www.w3.org/1999/xhtml', 'meta');
       meta.setAttribute('http-equiv', 'Content-Security-Policy');
       meta.setAttribute('content', CSP);

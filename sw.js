@@ -1,5 +1,5 @@
 // Cache-first app shell so Shelf works offline. Bump VERSION whenever any shell file changes.
-const VERSION = 'shelf-v4';
+const VERSION = 'shelf-v5';
 // No 'index.html': Cloudflare redirects it to './', and a cached redirect breaks navigations.
 const SHELL = ['./', 'app.js', 'epub.js', 'worker.js', 'pkg/boko.js', 'pkg/boko_bg.wasm',
   'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png'];

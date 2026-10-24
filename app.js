@@ -432,8 +432,8 @@ try {
 render();
 
 // Analytics and session replay (Siraaj), on the production site only. Books stay out of recordings:
-// the reader frame has `siraaj-block`, and book-derived text (library, details, status, TOC, <title>)
-// has `siraaj-mask`. Inputs are always masked by the SDK.
+// every chapter document has `siraaj-block` (set in epub.js), so does the file picker, and book-derived
+// text (library, details, status, TOC, <title>) has `siraaj-mask`. The SDK masks other inputs itself.
 const SIRAAJ = 'https://analytics.hefni101.dev';
 if (location.hostname === 'ebook.hefni101.dev') {
   const load = src => new Promise((resolve, reject) =>

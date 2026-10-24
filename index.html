@@ -109,7 +109,7 @@ footer.credit a { color: inherit; }
   <span class="spacer"></span>
   <button class="btn" id="lang"></button>
   <button class="btn primary" id="add">Add books</button>
-  <input type="file" id="pick" multiple accept=".epub,.azw3,.azw,.mobi,.kfx" hidden>
+  <input type="file" id="pick" class="siraaj-block" multiple accept=".epub,.azw3,.azw,.mobi,.kfx" hidden>
 </header>
 <p id="status" class="siraaj-mask" role="status" aria-live="polite"></p>
 
@@ -153,7 +153,7 @@ footer.credit a { color: inherit; }
       <option value="auto">Auto</option><option value="light">Light</option><option value="sepia">Sepia</option><option value="dark">Dark</option>
     </select>
   </header>
-  <iframe id="r-frame" class="siraaj-block" title="Book content" sandbox="allow-same-origin allow-scripts"></iframe>
+  <iframe id="r-frame" title="Book content" sandbox="allow-same-origin allow-scripts"></iframe>
   <footer class="bottom" id="r-bottom">
     <button class="btn" id="r-prev" aria-label="Previous chapter"><span class="chev" aria-hidden="true"></span>Prev</button>
     <span id="r-pos" dir="auto"></span>

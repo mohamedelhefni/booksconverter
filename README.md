@@ -23,7 +23,7 @@ Only the files allowlisted in `.assetsignore` are uploaded. Add new app files th
 
 ## Analytics
 
-On `ebook.hefni101.dev` only, `app.js` loads [Siraaj](https://github.com/mohamedelhefni/Siraaj-analytics) from `analytics.hefni101.dev`, with page views and session replay. Book content stays out of recordings: the reader frame has `siraaj-block`, and everything derived from a book (library grid, details dialog, status line, TOC, page title) has `siraaj-mask`. Give any new UI that shows book data one of those classes. The SDK honours Do Not Track.
+On `ebook.hefni101.dev` only, `app.js` loads [Siraaj](https://github.com/mohamedelhefni/Siraaj-analytics) from `analytics.hefni101.dev`, with page views and session replay. Book content stays out of recordings. Every chapter document gets `siraaj-block` on its `<html>` (rrweb ignores the class on the `<iframe>` itself), the file picker is blocked too, and everything derived from a book (library grid, details dialog, status line, TOC, page title) has `siraaj-mask`. Give any new UI that shows book data one of those classes. The SDK honours Do Not Track.
 
 ## Rebuild boko
 
